@@ -1,4 +1,4 @@
-package typedcsv
+package typedjson
 
 import java.time.LocalDate
 

@@ -1,4 +1,4 @@
-package typedcsv
+package typedjson
 
 import scala.io.Source
 import scala.util.Using
@@ -7,7 +7,7 @@ import scala.util.{Failure, Success}
 object Main:
   def main(args: Array[String]): Unit =
     if args.length != 1 then
-      Console.err.println("Usage: sbt \"run <path-to-csv>\"")
+      Console.err.println("Usage: sbt \"run <path-to-json>\"")
       sys.exit(2)
 
     val content = Using(Source.fromFile(args(0), "UTF-8"))(_.mkString) match
@@ -16,7 +16,7 @@ object Main:
         sys.exit(1)
       case Success(value) => value
 
-    Csv.parse(content, Transaction.schema) match
+    JsonData.parseTransactions(content) match
       case Left(errors) =>
         errors.foreach(error => Console.err.println(error.message))
         sys.exit(1)
