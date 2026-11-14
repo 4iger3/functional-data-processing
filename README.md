@@ -43,6 +43,19 @@ Run the tests:
 sbt test
 ```
 
+Start the local browser interface:
+
+```bash
+sbt "run gui"
+```
+
+Open the printed local URL (by default `http://127.0.0.1:8765`). Select a JSONL
+file or paste records, optionally load a JSON Schema file, then choose whether
+to validate only or also output normalized valid records. The interface uses
+the same Scala validation and parsing logic as the CLI. The server listens only
+on the local loopback interface; press `Ctrl+C` in the terminal to stop it.
+Use `sbt "run gui --port 9000"` to choose another local port.
+
 Validate the built-in transaction example:
 
 ```bash

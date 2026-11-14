@@ -30,7 +30,8 @@ object StreamingRunner:
       strict: Boolean,
       renderJson: A => Json,
       renderText: A => String,
-      writeLine: String => IO[Unit] = IO.println
+      writeLine: String => IO[Unit] = IO.println,
+      writeDiagnostic: String => IO[Unit] = message => Console[IO].errorln(message)
   )(using codec: JsonCodec[A]): IO[Either[String, RunMetrics]] =
     for
       started <- IO.monotonic
@@ -47,7 +48,8 @@ object StreamingRunner:
             state,
             renderJson,
             renderText,
-            writeLine
+            writeLine,
+            writeDiagnostic
           )
         }
         .map(_._2)
@@ -73,11 +75,12 @@ object StreamingRunner:
       state: DiagnosticState,
       renderJson: A => Json,
       renderText: A => String,
-      writeLine: String => IO[Unit]
+      writeLine: String => IO[Unit],
+      writeDiagnostic: String => IO[Unit]
   ): IO[(DiagnosticState, StreamRecord[A])] =
     val plan = diagnosticPlan(record, maxErrors, quiet, state)
     val diagnostics = traverseVector_(plan.messages) { case (level, message) =>
-      Console[IO].errorln(s"$level: $message")
+      writeDiagnostic(s"$level: $message")
     }
 
     val output = (mode, record.result.value) match

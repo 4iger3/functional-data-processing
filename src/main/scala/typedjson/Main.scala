@@ -51,6 +51,10 @@ object Main extends CommandIOApp(
     val sample = Command("sample", "Print valid JSON Lines records")(
       Opts.flag("quiet", help = "Suppress output").orFalse.map(runSample)
     )
+    val gui = Command("gui", "Open the local browser interface")(
+      Opts.option[Int]("port", help = "Local interface port").withDefault(8765)
+        .map(GuiServer.run)
+    )
     val explain = Command("explain", "Explain a transaction field")(
       (
         Opts.argument[String](metavar = "FIELD"),
@@ -62,6 +66,7 @@ object Main extends CommandIOApp(
       .orElse(Opts.subcommand(parse))
       .orElse(Opts.subcommand(schema))
       .orElse(Opts.subcommand(sample))
+      .orElse(Opts.subcommand(gui))
       .orElse(Opts.subcommand(explain))
 
   private def runFile(options: FileOptions, mode: ProcessingMode): IO[ExitCode] =
