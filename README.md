@@ -27,6 +27,8 @@ API, or used by another batch job.
 The project is also a demonstration of functional programming in Scala 3:
 schemas and codecs are values, validation results are explicit, independent
 errors can accumulate, and file processing uses FS2 streams.
+The byte-to-line reader carries immutable state between chunks, while file,
+console, timing, and logging effects are represented in Cats Effect `IO`.
 
 ## Requirements
 

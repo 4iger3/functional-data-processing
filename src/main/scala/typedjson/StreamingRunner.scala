@@ -1,6 +1,7 @@
 package typedjson
 
-import cats.effect.IO
+import cats.effect.{Clock, IO}
+import cats.effect.std.Console
 import cats.syntax.all.*
 import fs2.Stream
 import io.circe.Json
@@ -76,7 +77,7 @@ object StreamingRunner:
   ): IO[(DiagnosticState, StreamRecord[A])] =
     val plan = diagnosticPlan(record, maxErrors, quiet, state)
     val diagnostics = traverseVector_(plan.messages) { case (level, message) =>
-      IO(System.err.println(s"$level: $message"))
+      Console[IO].errorln(s"$level: $message")
     }
 
     val output = (mode, record.result.value) match
@@ -156,7 +157,11 @@ object StreamingRunner:
         "errorCounts" -> RunMetrics.summaryJson(metrics)
           .hcursor.downField("errorCounts").focus.getOrElse(Json.obj())
       )
-      IO.delay(StructuredLog.event(level, "command_completed", fields*))
+      Clock[IO].realTimeInstant.flatMap { timestamp =>
+        Console[IO].errorln(
+          StructuredLog.renderEvent(timestamp, level, "command_completed", fields*)
+        )
+      }
 
   private def traverseVector_[A](values: Vector[A])(f: A => IO[Unit]): IO[Unit] =
     values.foldLeft(IO.unit)((effect, value) => effect *> f(value))

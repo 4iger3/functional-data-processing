@@ -4,15 +4,20 @@ import io.circe.Json
 import java.time.Instant
 
 object StructuredLog:
-  def event(level: String, name: String, fields: (String, Json)*): Unit =
+  def renderEvent(
+      timestamp: Instant,
+      level: String,
+      name: String,
+      fields: (String, Json)*
+  ): String =
     val record = Json.obj(
       (Vector(
-        "timestamp" -> Json.fromString(Instant.now().toString),
+        "timestamp" -> Json.fromString(timestamp.toString),
         "level" -> Json.fromString(level),
         "event" -> Json.fromString(name)
       ) ++ fields)*
     )
-    Console.err.println(record.noSpaces)
+    record.noSpaces
 
   def enabled(configured: String, level: String): Boolean =
     val order = Map("debug" -> 0, "info" -> 1, "warn" -> 2, "error" -> 3, "off" -> 4)

@@ -1,6 +1,7 @@
 package typedjson
 
-import cats.effect.{ExitCode, IO}
+import cats.effect.{Clock, ExitCode, IO}
+import cats.effect.std.Console
 import cats.syntax.all.*
 import com.monovore.decline.*
 import com.monovore.decline.effect.CommandIOApp
@@ -65,16 +66,17 @@ object Main extends CommandIOApp(
 
   private def runFile(options: FileOptions, mode: ProcessingMode): IO[ExitCode] =
     if !Set("text", "json").contains(options.format.toLowerCase) then
-      IO(System.err.println("Error: --format must be either 'text' or 'json'"))
+      stderr("Error: --format must be either 'text' or 'json'")
         .as(ExitCode(2))
     else if options.maxErrors.exists(_ < 1) then
-      IO(System.err.println("Error: --max-errors must be at least 1"))
+      stderr("Error: --max-errors must be at least 1")
         .as(ExitCode(2))
     else if options.maxRecordBytes.exists(_ < 1) then
-      IO(System.err.println("Error: --max-record-bytes must be at least 1"))
+      stderr("Error: --max-record-bytes must be at least 1")
         .as(ExitCode(2))
     else
-      IO.fromEither(AppConfig.load(options.config).leftMap(new IllegalArgumentException(_)))
+      IO.blocking(AppConfig.load(options.config))
+        .flatMap(result => IO.fromEither(result.leftMap(new IllegalArgumentException(_))))
         .flatMap { config =>
           val effectiveConfig = config.copy(
             maxErrors = options.maxErrors.getOrElse(config.maxErrors),
@@ -106,18 +108,21 @@ object Main extends CommandIOApp(
                 }
         }
         .handleErrorWith { error =>
-          val log = AppConfig.load(options.config) match
+          IO.blocking(AppConfig.load(options.config)).flatMap {
             case Right(config) if StructuredLog.enabled(config.logLevel, "error") =>
-              IO.delay(
-                StructuredLog.event(
-                  "error",
-                  "command_failed",
-                  "command" -> Json.fromString(modeName(mode)),
-                  "message" -> Json.fromString(error.getMessage)
+              Clock[IO].realTimeInstant.flatMap { timestamp =>
+                Console[IO].errorln(
+                  StructuredLog.renderEvent(
+                    timestamp,
+                    "error",
+                    "command_failed",
+                    "command" -> Json.fromString(modeName(mode)),
+                    "message" -> Json.fromString(error.getMessage)
+                  )
                 )
-              )
+              }
             case _ => IO.unit
-          log *> IO(System.err.println(s"Error: ${error.getMessage}")).as(ExitCode.Error)
+          } *> stderr(s"Error: ${error.getMessage}").as(ExitCode.Error)
         }
 
   private def runConfigured[A](
@@ -139,16 +144,18 @@ object Main extends CommandIOApp(
         renderJson = renderJson,
         renderText = renderText
       )(using codec)
-      .map {
-        case Right(_) => ExitCode.Success
-        case Left(message) =>
-          if !options.quiet then System.err.println(s"Error: $message")
-          ExitCode.Error
+      .flatMap {
+        case Right(_) => IO.pure(ExitCode.Success)
+        case Left(_) if options.quiet => IO.pure(ExitCode.Error)
+        case Left(message) => stderr(s"Error: $message").as(ExitCode.Error)
       }
+
+  private def stderr(message: String): IO[Unit] =
+    Console[IO].errorln(message)
 
   private def runSchema(format: String, quiet: Boolean): IO[ExitCode] =
     if !Set("text", "json").contains(format.toLowerCase) then
-      IO(System.err.println("Error: --format must be either 'text' or 'json'"))
+      stderr("Error: --format must be either 'text' or 'json'")
         .as(ExitCode(2))
     else if quiet then IO.pure(ExitCode.Success)
     else if format.equalsIgnoreCase("json") then
@@ -192,7 +199,7 @@ object Main extends CommandIOApp(
       case Some(_) if quiet => IO.pure(ExitCode.Success)
       case Some(text)       => IO.println(s"$field: $text").as(ExitCode.Success)
       case None =>
-        IO(System.err.println(s"Error: unknown transaction field '$field'"))
+        stderr(s"Error: unknown transaction field '$field'")
           .as(ExitCode(2))
 
   private val schemaJson: Json = Transaction.schema.jsonSchema

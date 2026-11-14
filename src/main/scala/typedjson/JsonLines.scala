@@ -4,7 +4,6 @@ import cats.effect.IO
 import fs2.{Chunk, Pipe, Pull, Stream}
 import fs2.io.readInputStream
 import io.circe.{Json, parser}
-import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 import typedjson.JsonError.MalformedJson
@@ -45,61 +44,67 @@ object JsonLines:
     StreamRecord(line.index + 1, result)
 
   private def boundedLines(maxRecordBytes: Int): Pipe[IO, Byte, InputLine] = input =>
-    def loop(stream: Stream[IO, Byte], accumulator: LineAccumulator): Pull[IO, InputLine, Unit] =
+    def loop(stream: Stream[IO, Byte], state: LineState): Pull[IO, InputLine, Unit] =
       stream.pull.uncons.flatMap {
         case None =>
-          accumulator.finish match
+          state.finish(maxRecordBytes) match
             case Some(lastLine) => Pull.output1(lastLine)
             case None           => Pull.done
         case Some((chunk, tail)) =>
-          val completed = Vector.newBuilder[InputLine]
-          chunk.foreach(byte => accumulator.add(byte).foreach(completed += _))
-          Pull.output(Chunk.from(completed.result())) >> loop(tail, accumulator)
+          val (nextState, completed) = chunk.foldLeft((state, Vector.empty[InputLine])) {
+            case ((currentState, lines), byte) =>
+              val (updatedState, line) = currentState.add(byte, maxRecordBytes)
+              (updatedState, lines ++ line)
+          }
+          Pull.output(Chunk.from(completed)) >> loop(tail, nextState)
       }
 
-    loop(input, new LineAccumulator(maxRecordBytes)).stream
+    loop(input, LineState()).stream
 
-  private final class LineAccumulator(maxRecordBytes: Int):
-    private val bytes = new ByteArrayOutputStream(math.min(maxRecordBytes, 8192))
-    private var lineIndex = 0L
-    private var oversized = false
-    private var hasContent = false
-    private var hasNonWhitespace = false
-    private var pendingCarriageReturn = false
-
-    def add(byte: Byte): Option[InputLine] =
+  private final case class LineState(
+      index: Long = 0L,
+      bytes: Vector[Byte] = Vector.empty,
+      oversized: Boolean = false,
+      hasContent: Boolean = false,
+      hasNonWhitespace: Boolean = false,
+      pendingCarriageReturn: Boolean = false
+  ):
+    def add(byte: Byte, maxRecordBytes: Int): (LineState, Vector[InputLine]) =
       if byte == '\n'.toByte then
-        val line = completedLine()
-        lineIndex += 1
-        bytes.reset()
-        oversized = false
-        hasContent = false
-        hasNonWhitespace = false
-        pendingCarriageReturn = false
-        Some(line)
+        (LineState(index = index + 1), Vector(completedLine))
       else
-        hasContent = true
-        hasNonWhitespace = hasNonWhitespace || (byte & 0xff) > ' '.toInt
-        if pendingCarriageReturn then append('\r'.toByte)
-        pendingCarriageReturn = byte == '\r'.toByte
-        if !pendingCarriageReturn then append(byte)
-        None
+        val withPreviousCarriageReturn =
+          if pendingCarriageReturn then append('\r'.toByte, maxRecordBytes)
+          else this
+        val isCarriageReturn = byte == '\r'.toByte
+        val updated =
+          if isCarriageReturn then withPreviousCarriageReturn
+          else withPreviousCarriageReturn.append(byte, maxRecordBytes)
+        (
+          updated.copy(
+            hasContent = true,
+            hasNonWhitespace = hasNonWhitespace || (byte & 0xff) > ' '.toInt,
+            pendingCarriageReturn = isCarriageReturn
+          ),
+          Vector.empty
+        )
 
-    def finish: Option[InputLine] =
-      if pendingCarriageReturn then append('\r'.toByte)
-      if hasContent then Some(completedLine())
-      else None
+    def finish(maxRecordBytes: Int): Option[InputLine] =
+      val finalized =
+        if pendingCarriageReturn then
+          append('\r'.toByte, maxRecordBytes).copy(pendingCarriageReturn = false)
+        else this
+      Option.when(finalized.hasContent)(finalized.completedLine)
 
-    private def append(byte: Byte): Unit =
+    private def append(byte: Byte, maxRecordBytes: Int): LineState =
       if !oversized then
-        if bytes.size() < maxRecordBytes then bytes.write(byte.toInt)
+        if bytes.size < maxRecordBytes then copy(bytes = bytes :+ byte)
         else
-          oversized = true
-          bytes.reset()
+          copy(bytes = Vector.empty, oversized = true)
+      else this
 
-    private def completedLine(): InputLine =
-      if oversized && hasNonWhitespace then InputLine(lineIndex, None)
-      else if oversized then InputLine(lineIndex, Some(""))
+    private def completedLine: InputLine =
+      if oversized && hasNonWhitespace then InputLine(index, None)
+      else if oversized then InputLine(index, Some(""))
       else
-        val raw = bytes.toByteArray
-        InputLine(lineIndex, Some(new String(raw, StandardCharsets.UTF_8)))
+        InputLine(index, Some(new String(bytes.toArray, StandardCharsets.UTF_8)))
