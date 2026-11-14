@@ -4,22 +4,32 @@ import io.circe.parser.parse
 import typedjson.JsonError.*
 
 object JsonData:
+  def decodeTransaction(
+      json: io.circe.Json,
+      path: JsonPath
+  ): DecodeResult[Transaction] =
+    Transaction.schema.decodeJson(json, path)
+
   def parseTransactions(
       input: String
-  ): Either[Vector[JsonError], Vector[Transaction]] =
-    parse(input)
-      .left
-      .map(error => Vector(MalformedJson(error.message)))
-      .flatMap { json =>
+  ): DecodeResult[Vector[Transaction]] =
+    parse(input) match
+      case Left(error) =>
+        DecodeResult.failure(MalformedJson(JsonPath.root, error.message))
+      case Right(json) =>
         json.asArray match
-          case None => Left(Vector(ExpectedArray()))
+          case None =>
+            DecodeResult.failure(ExpectedArray(JsonPath.root))
           case Some(records) =>
             val decoded = records.zipWithIndex.map { case (record, index) =>
+              val path = JsonPath.root.index(index)
               record.asObject match
-                case None => Left(Vector(ExpectedObject(index + 1)))
-                case Some(value) => Transaction.schema.decodeRecord(value, index + 1)
+                case None => DecodeResult.failure[Transaction](ExpectedObject(path))
+                case Some(_) => decodeTransaction(record, path)
             }
-            val errors = decoded.collect { case Left(recordErrors) => recordErrors }.flatten
-            if errors.nonEmpty then Left(errors)
-            else Right(decoded.collect { case Right(transaction) => transaction })
-      }
+            val errors = decoded.flatMap(_.value.left.toOption.getOrElse(Vector.empty))
+            val warnings = decoded.flatMap(_.warnings)
+            val values =
+              if errors.nonEmpty then Left(errors)
+              else Right(decoded.flatMap(_.value.toOption))
+            DecodeResult(values, warnings)
