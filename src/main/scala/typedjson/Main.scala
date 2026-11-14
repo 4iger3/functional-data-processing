@@ -85,8 +85,11 @@ object Main extends CommandIOApp(
               mode,
               options.format.toLowerCase,
               options.quiet,
-              strict = options.strict || effectiveConfig.strict
-            )
+              strict = options.strict || effectiveConfig.strict,
+              renderJson = StreamingJson.renderTransaction,
+              renderText = transaction =>
+                s"${transaction.date} ${transaction.category.value} ${transaction.amount}"
+            )(using Transaction.schema.codec)
             .map {
               case Right(_) => ExitCode.Success
               case Left(message) =>

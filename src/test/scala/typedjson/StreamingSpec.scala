@@ -1,6 +1,9 @@
 package typedjson
 
 import cats.effect.unsafe.implicits.global
+import cats.effect.Ref
+import cats.effect.IO
+import io.circe.Json
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 import munit.FunSuite
@@ -25,7 +28,8 @@ final class StreamingSpec extends FunSuite:
         |""".stripMargin
 
     withInput(input) { path =>
-      val records = StreamingJson.records(path, config).compile.toVector.unsafeRunSync()
+      val records = JsonLines.records[Transaction](path, config)(using Transaction.schema.codec)
+        .compile.toVector.unsafeRunSync()
 
       assertEquals(records.map(_.line), Vector(1L, 3L))
       assert(records.head.result.value.isRight)
@@ -51,7 +55,8 @@ final class StreamingSpec extends FunSuite:
     val boundedConfig = config.copy(maxRecordBytes = 64, inputChunkSize = 8)
 
     withInput(input) { path =>
-      val records = StreamingJson.records(path, boundedConfig).compile.toVector.unsafeRunSync()
+      val records = JsonLines.records[Transaction](path, boundedConfig)(using Transaction.schema.codec)
+        .compile.toVector.unsafeRunSync()
 
       assertEquals(records.size, 2)
       assertEquals(records.head.line, 2L)
@@ -69,7 +74,8 @@ final class StreamingSpec extends FunSuite:
     )
 
     withInput(record + "\r\n") { path =>
-      val records = StreamingJson.records(path, boundedConfig).compile.toVector.unsafeRunSync()
+      val records = JsonLines.records[Transaction](path, boundedConfig)(using Transaction.schema.codec)
+        .compile.toVector.unsafeRunSync()
       assertEquals(records.size, 1)
       assert(records.head.result.value.isRight)
     }
@@ -108,19 +114,28 @@ final class StreamingSpec extends FunSuite:
 
     withInput(invalid) { path =>
       val result = StreamingRunner
-        .run(path, config, ProcessingMode.Validate, "text", quiet = true, strict = false)
+        .run(path, config, ProcessingMode.Validate, "text", quiet = true, strict = false,
+          renderJson = StreamingJson.renderTransaction,
+          renderText = _.category.value
+        )(using Transaction.schema.codec)
         .unsafeRunSync()
       assert(result.isLeft)
     }
     withInput(warning) { path =>
       val result = StreamingRunner
-        .run(path, config, ProcessingMode.Validate, "text", quiet = true, strict = true)
+        .run(path, config, ProcessingMode.Validate, "text", quiet = true, strict = true,
+          renderJson = StreamingJson.renderTransaction,
+          renderText = _.category.value
+        )(using Transaction.schema.codec)
         .unsafeRunSync()
       assert(result.isLeft)
     }
     withInput(warning) { path =>
       val result = StreamingRunner
-        .run(path, config, ProcessingMode.Validate, "text", quiet = true, strict = false)
+        .run(path, config, ProcessingMode.Validate, "text", quiet = true, strict = false,
+          renderJson = StreamingJson.renderTransaction,
+          renderText = _.category.value
+        )(using Transaction.schema.codec)
         .unsafeRunSync()
       assertEquals(result.toOption.map(_.warnings), Some(1L))
     }
@@ -149,4 +164,47 @@ final class StreamingSpec extends FunSuite:
       schema.hcursor.get[Vector[String]]("x-validationRules").toOption.get,
       Vector("note is required when amount is at least 1000")
     )
+  }
+
+  test("generic JSON Lines decoding supports a non-transaction schema") {
+    val labelSchema = Schema.field(Column.required[String]("label"))(identity)
+    val input = """{"label":"first"}""" + "\n"
+
+    withInput(input) { path =>
+      val records = JsonLines.records[String](path, config)(using labelSchema.codec)
+        .compile.toVector.unsafeRunSync()
+      assertEquals(records.map(_.result.value), Vector(Right("first")))
+    }
+  }
+
+  test("parse emits valid records before and after an invalid record, then fails") {
+    val labelSchema = Schema.field(Column.required[String]("label"))(identity)
+    val input =
+      """{"label":"before"}
+        |{"label":1}
+        |{"label":"after"}
+        |""".stripMargin
+
+    withInput(input) { path =>
+      val result = for
+        output <- Ref.of[IO, Vector[String]](Vector.empty)
+        outcome <- StreamingRunner
+          .run[String](
+            path,
+            config,
+            ProcessingMode.Parse,
+            "json",
+            quiet = false,
+            strict = false,
+            renderJson = Json.fromString,
+            renderText = identity,
+            writeLine = line => output.update(_ :+ line)
+          )(using labelSchema.codec)
+        emitted <- output.get
+      yield (outcome, emitted)
+      val (outcome, emitted) = result.unsafeRunSync()
+
+      assert(outcome.isLeft)
+      assertEquals(emitted, Vector(""""before"""", """"after""""))
+    }
   }

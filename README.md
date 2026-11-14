@@ -28,9 +28,27 @@ must be JSON numbers. Additional JSON fields are ignored with warnings.
 `validate` checks records and reports a summary; `parse` emits valid records as
 normalized JSON Lines when `--format json` is selected.
 
+`parse` is a streaming, non-atomic operation: each valid record is written as
+soon as it has been decoded. Invalid records are reported and skipped, later
+records are still processed, and the command exits unsuccessfully if any
+record failed. Strict mode can also return a failure for warnings after valid
+records have already been emitted. Consequently, stdout may contain partial or
+complete valid output even when the final exit status is non-zero.
+`--quiet` suppresses parsed records as well as successful summaries; diagnostics
+for errors remain visible. Redirect output to a temporary file and move it into
+place only after a successful exit if the consumer requires an all-or-nothing
+result.
+
 The library API is separate: `JsonData.parseTransactions` accepts a single JSON
 array and accumulates errors across its elements. Schemas can also be composed
-to validate nested objects.
+to validate nested objects. The JSON Lines streaming API is generic over
+`JsonCodec[A]`, so an application can stream records for its own model without
+using `Transaction`:
+
+```scala
+val records: fs2.Stream[cats.effect.IO, StreamRecord[MyRecord]] =
+  JsonLines.records[MyRecord](path, config)(using myRecordSchema.codec)
+```
 
 Malformed JSON and invalid fields are reported with precise paths. The CLI
 returns a non-zero exit status if validation fails; `--strict` also fails when

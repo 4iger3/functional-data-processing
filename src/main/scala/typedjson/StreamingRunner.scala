@@ -20,28 +20,41 @@ object StreamingRunner:
       messages: Vector[(String, String)]
   )
 
-  def run(
+  def run[A](
       path: Path,
       config: AppConfig,
       mode: ProcessingMode,
       format: String,
       quiet: Boolean,
-      strict: Boolean
-  ): IO[Either[String, RunMetrics]] =
+      strict: Boolean,
+      renderJson: A => Json,
+      renderText: A => String,
+      writeLine: String => IO[Unit] = IO.println
+  )(using codec: JsonCodec[A]): IO[Either[String, RunMetrics]] =
     for
       started <- IO.monotonic
       initial = RunMetrics()
-      result <- StreamingJson
-        .records(path, config)
+      result <- JsonLines
+        .records[A](path, config)
         .evalMapAccumulate(DiagnosticState()) { (state, record) =>
-          emitRecord(record, mode, format, quiet, config.maxErrors, state)
+          emitRecord(
+            record,
+            mode,
+            format,
+            quiet,
+            config.maxErrors,
+            state,
+            renderJson,
+            renderText,
+            writeLine
+          )
         }
         .map(_._2)
         .compile
         .fold(initial) { (metrics, record) => metrics.record(record.result) }
       finished <- IO.monotonic
       metrics = result.copy(elapsedNanos = (finished - started).toNanos)
-      _ <- emitSummary(metrics, mode, format, quiet)
+      _ <- emitSummary(metrics, mode, format, quiet, writeLine)
       _ <- logCompletion(metrics, mode, strict, config, quiet)
       outcome =
         if metrics.errors > 0 then Left(s"Found ${metrics.errors} decoding errors.")
@@ -50,31 +63,32 @@ object StreamingRunner:
         else Right(metrics)
     yield outcome
 
-  private def emitRecord(
-      record: StreamRecord,
+  private def emitRecord[A](
+      record: StreamRecord[A],
       mode: ProcessingMode,
       format: String,
       quiet: Boolean,
       maxErrors: Int,
-      state: DiagnosticState
-  ): IO[(DiagnosticState, StreamRecord)] =
+      state: DiagnosticState,
+      renderJson: A => Json,
+      renderText: A => String,
+      writeLine: String => IO[Unit]
+  ): IO[(DiagnosticState, StreamRecord[A])] =
     val plan = diagnosticPlan(record, maxErrors, quiet, state)
     val diagnostics = traverseVector_(plan.messages) { case (level, message) =>
       IO(System.err.println(s"$level: $message"))
     }
 
     val output = (mode, record.result.value) match
-      case (ProcessingMode.Parse, Right(transaction)) if !quiet =>
-        val json = StreamingJson.renderTransaction(transaction)
-        val rendered = if format == "json" then json.noSpaces else
-          s"${transaction.date} ${transaction.category.value} ${transaction.amount}"
-        IO.println(rendered)
+      case (ProcessingMode.Parse, Right(value)) if !quiet =>
+        val rendered = if format == "json" then renderJson(value).noSpaces else renderText(value)
+        writeLine(rendered)
       case _ => IO.unit
 
     (diagnostics *> output).as((plan.state, record))
 
   private[typedjson] def diagnosticPlan(
-      record: StreamRecord,
+      record: StreamRecord[?],
       maxErrors: Int,
       quiet: Boolean,
       state: DiagnosticState
@@ -104,12 +118,13 @@ object StreamingRunner:
       metrics: RunMetrics,
       mode: ProcessingMode,
       format: String,
-      quiet: Boolean
+      quiet: Boolean,
+      writeLine: String => IO[Unit]
   ): IO[Unit] =
     if quiet || mode == ProcessingMode.Parse then IO.unit
-    else if format == "json" then IO.println(RunMetrics.summaryJson(metrics).noSpaces)
+    else if format == "json" then writeLine(RunMetrics.summaryJson(metrics).noSpaces)
     else
-      IO.println(
+      writeLine(
         s"Records: ${metrics.records}, valid: ${metrics.validRecords}, " +
           s"errors: ${metrics.errors}, warnings: ${metrics.warnings}, " +
           f"elapsed: ${metrics.elapsedNanos / 1000000.0}%.2f ms"
