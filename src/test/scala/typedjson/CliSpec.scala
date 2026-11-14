@@ -109,5 +109,52 @@ final class CliSpec extends FunSuite:
           .unsafeRunSync()
         assertEquals(result, ExitCode.Error)
       }
+
+      test("file-based JSON Schema validates a non-transaction JSONL format") {
+        val input = """{"sku":"A-104","quantity":12}""" + "\n"
+        val invalidInput = """{"sku":"","quantity":-1,"extra":true}""" + "\n"
+        val schema = Files.createTempFile("typed-json-schema-", ".json")
+        try
+          Files.writeString(
+            schema,
+            """{
+              |  "type": "object",
+              |  "properties": {
+              |    "sku": {"type": "string", "minLength": 1},
+              |    "quantity": {"type": "integer", "minimum": 0}
+              |  },
+              |  "required": ["sku", "quantity"],
+              |  "additionalProperties": false
+              |}""".stripMargin,
+            StandardCharsets.UTF_8
+          )
+          withInput(input) { path =>
+            val result = Main
+              .run(List("validate", path.toString, "--schema", schema.toString, "--quiet"))
+              .unsafeRunSync()
+            assertEquals(result, ExitCode.Success)
+          }
+          withInput(invalidInput) { path =>
+            val result = Main
+              .run(List("validate", path.toString, "--schema", schema.toString, "--quiet"))
+              .unsafeRunSync()
+            assertEquals(result, ExitCode.Error)
+          }
+        finally Files.deleteIfExists(schema)
+      }
+
+      test("file-based schema load errors fail explicitly") {
+        val input = """{"sku":"A-104","quantity":12}""" + "\n"
+        val schema = Files.createTempFile("typed-json-schema-invalid-", ".json")
+        try
+          Files.writeString(schema, """{"type":"object","properties":{},"patternProperties":{}}""")
+          withInput(input) { path =>
+            val result = Main
+              .run(List("validate", path.toString, "--schema", schema.toString, "--quiet"))
+              .unsafeRunSync()
+            assertEquals(result, ExitCode.Error)
+          }
+        finally Files.deleteIfExists(schema)
+      }
     finally Files.deleteIfExists(config)
   }

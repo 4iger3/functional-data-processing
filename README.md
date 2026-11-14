@@ -18,6 +18,8 @@ Requirements: Java 17+ and sbt.
 sbt test
 sbt "run validate examples/transactions.jsonl"
 sbt "run parse examples/transactions.jsonl --format json"
+sbt "run validate examples/inventory.jsonl --schema examples/schemas/inventory.schema.json"
+sbt "run parse examples/inventory.jsonl --schema examples/schemas/inventory.schema.json --format json"
 sbt "run schema --format json"
 ```
 
@@ -49,6 +51,32 @@ using `Transaction`:
 val records: fs2.Stream[cats.effect.IO, StreamRecord[MyRecord]] =
   JsonLines.records[MyRecord](path, config)(using myRecordSchema.codec)
 ```
+
+### External CLI schemas
+
+Pass `--schema FILE` to `validate` or `parse` to validate records against a
+JSON Schema file instead of the built-in transaction schema. The CLI currently
+supports a documented subset of JSON Schema Draft 2020-12:
+
+- Object properties, required property names, and boolean
+  `additionalProperties`.
+- Nested objects and arrays with an `items` schema; arrays also support
+  `minItems` and `maxItems`.
+- `string` with `minLength`, `maxLength`, and `pattern` (patterns use JVM regex
+  syntax, which is not identical to every JSON Schema regex implementation).
+- `number` and `integer` with inclusive `minimum` and `maximum`.
+- `boolean` and `null`.
+
+The schema loader rejects unsupported keywords and invalid definitions rather
+than silently ignoring them. For external schemas, `parse` preserves the input
+JSON value for valid records; it validates and streams the original record
+rather than applying transformations or supplying defaults.
+`additionalProperties` defaults to `true` as in JSON Schema; unknown keys are
+accepted in that case, and rejected when it is set to `false`. The sample
+[inventory.schema.json](./examples/schemas/inventory.schema.json) and
+[inventory.jsonl](./examples/inventory.jsonl) demonstrate a schema with nested
+objects and arrays. A complete JSON Schema validator is not included, so this
+subset should not be treated as compatible with arbitrary JSON Schema files.
 
 Malformed JSON and invalid fields are reported with precise paths. The CLI
 returns a non-zero exit status if validation fails; `--strict` also fails when

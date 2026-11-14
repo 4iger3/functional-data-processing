@@ -9,11 +9,12 @@ import java.nio.file.Paths
 
 object Main extends CommandIOApp(
       name = "typed-json",
-      header = "Validate and process transaction JSON Lines"
+      header = "Validate and process typed or schema-driven JSON Lines"
     ):
   private final case class FileOptions(
       file: String,
       config: Option[String],
+      schema: Option[String],
       format: String,
       quiet: Boolean,
       strict: Boolean,
@@ -25,6 +26,7 @@ object Main extends CommandIOApp(
     (
       Opts.argument[String](metavar = "FILE"),
       Opts.option[String]("config", help = "HOCON configuration file").orNone,
+      Opts.option[String]("schema", help = "JSON Schema file for validating generic JSONL records").orNone,
       Opts.option[String]("format", help = "Output format: text or json").withDefault("text"),
       Opts.flag("quiet", help = "Suppress successful output and warnings").orFalse,
       Opts.flag("strict", help = "Treat warnings as failures").orFalse,
@@ -36,7 +38,7 @@ object Main extends CommandIOApp(
     val validate = Command("validate", "Validate a JSON Lines file")(
       fileOptions.map(options => runFile(options, ProcessingMode.Validate))
     )
-    val parse = Command("parse", "Validate and emit normalized transactions")(
+    val parse = Command("parse", "Validate and emit normalized JSON Lines records")(
       fileOptions.map(options => runFile(options, ProcessingMode.Parse))
     )
     val schema = Command("schema", "Print the transaction schema")(
@@ -78,24 +80,30 @@ object Main extends CommandIOApp(
             maxErrors = options.maxErrors.getOrElse(config.maxErrors),
             maxRecordBytes = options.maxRecordBytes.getOrElse(config.maxRecordBytes)
           )
-          StreamingRunner
-            .run(
-              Paths.get(options.file),
-              effectiveConfig,
-              mode,
-              options.format.toLowerCase,
-              options.quiet,
-              strict = options.strict || effectiveConfig.strict,
-              renderJson = StreamingJson.renderTransaction,
-              renderText = transaction =>
-                s"${transaction.date} ${transaction.category.value} ${transaction.amount}"
-            )(using Transaction.schema.codec)
-            .map {
-              case Right(_) => ExitCode.Success
-              case Left(message) =>
-                if !options.quiet then System.err.println(s"Error: $message")
-                ExitCode.Error
-            }
+          options.schema match
+            case None =>
+              runConfigured(
+                options,
+                mode,
+                effectiveConfig,
+                Transaction.schema.codec,
+                StreamingJson.renderTransaction,
+                transaction =>
+                  s"${transaction.date} ${transaction.category.value} ${transaction.amount}"
+              )
+            case Some(schemaFile) =>
+              IO.blocking(RuntimeJsonSchema.load(Paths.get(schemaFile)))
+                .flatMap(result => IO.fromEither(result.leftMap(new IllegalArgumentException(_))))
+                .flatMap { schema =>
+                  runConfigured(
+                    options,
+                    mode,
+                    effectiveConfig,
+                    schema,
+                    identity,
+                    _.noSpaces
+                  )
+                }
         }
         .handleErrorWith { error =>
           val log = AppConfig.load(options.config) match
@@ -111,6 +119,32 @@ object Main extends CommandIOApp(
             case _ => IO.unit
           log *> IO(System.err.println(s"Error: ${error.getMessage}")).as(ExitCode.Error)
         }
+
+  private def runConfigured[A](
+      options: FileOptions,
+      mode: ProcessingMode,
+      config: AppConfig,
+      codec: JsonCodec[A],
+      renderJson: A => Json,
+      renderText: A => String
+  ): IO[ExitCode] =
+    StreamingRunner
+      .run[A](
+        Paths.get(options.file),
+        config,
+        mode,
+        options.format.toLowerCase,
+        options.quiet,
+        strict = options.strict || config.strict,
+        renderJson = renderJson,
+        renderText = renderText
+      )(using codec)
+      .map {
+        case Right(_) => ExitCode.Success
+        case Left(message) =>
+          if !options.quiet then System.err.println(s"Error: $message")
+          ExitCode.Error
+      }
 
   private def runSchema(format: String, quiet: Boolean): IO[ExitCode] =
     if !Set("text", "json").contains(format.toLowerCase) then
