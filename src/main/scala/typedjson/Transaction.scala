@@ -12,11 +12,20 @@ final case class Transaction(
     (amount * (BigDecimal(1) + rate)).setScale(2, BigDecimal.RoundingMode.HALF_UP)
 
 object Transaction:
-  private val dateColumn = Column.required[LocalDate]("date")
-  private val categoryColumn = Column.required[NonEmptyString]("category")
+  private val dateColumn =
+    Column.required[LocalDate]("date").describe("Transaction date in YYYY-MM-DD format.")
+  private val categoryColumn =
+    Column.required[NonEmptyString]("category").describe("Non-empty transaction category.")
   private val amountColumn =
-    Column.required[BigDecimal]("amount").validateRange(BigDecimal(0), BigDecimal(1000000))
-  private val noteColumn = Column.optional[String]("note").deprecatedAlias("memo")
+    Column
+      .required[BigDecimal]("amount")
+      .validateRange(BigDecimal(0), BigDecimal(1000000))
+      .describe("Transaction amount in the inclusive range 0–1,000,000.")
+  private val noteColumn =
+    Column
+      .optional[String]("note")
+      .deprecatedAlias("memo")
+      .describe("Optional note; required when amount is at least 1000.")
 
   val schema: Schema[Transaction] =
     Schema
@@ -34,3 +43,4 @@ object Transaction:
           )
         else Right(())
       }
+      .withValidationRule("note is required when amount is at least 1000")

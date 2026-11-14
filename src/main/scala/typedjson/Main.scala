@@ -5,7 +5,7 @@ import cats.syntax.all.*
 import com.monovore.decline.*
 import com.monovore.decline.effect.CommandIOApp
 import io.circe.Json
-import java.nio.file.{Path, Paths}
+import java.nio.file.Paths
 
 object Main extends CommandIOApp(
       name = "typed-json",
@@ -16,7 +16,9 @@ object Main extends CommandIOApp(
       config: Option[String],
       format: String,
       quiet: Boolean,
-      strict: Boolean
+      strict: Boolean,
+      maxErrors: Option[Int],
+      maxRecordBytes: Option[Int]
   )
 
   private val fileOptions: Opts[FileOptions] =
@@ -25,7 +27,9 @@ object Main extends CommandIOApp(
       Opts.option[String]("config", help = "HOCON configuration file").orNone,
       Opts.option[String]("format", help = "Output format: text or json").withDefault("text"),
       Opts.flag("quiet", help = "Suppress successful output and warnings").orFalse,
-      Opts.flag("strict", help = "Treat warnings as failures").orFalse
+      Opts.flag("strict", help = "Treat warnings as failures").orFalse,
+      Opts.option[Int]("max-errors", help = "Maximum number of error details to print").orNone,
+      Opts.option[Int]("max-record-bytes", help = "Maximum byte size of a JSON Lines record").orNone
     ).mapN(FileOptions.apply)
 
   override def main: Opts[IO[ExitCode]] =
@@ -41,7 +45,7 @@ object Main extends CommandIOApp(
         Opts.flag("quiet", help = "Suppress output").orFalse
       ).mapN(runSchema)
     )
-    val sample = Command("sample", "Print a valid JSON Lines sample")(
+    val sample = Command("sample", "Print valid JSON Lines records")(
       Opts.flag("quiet", help = "Suppress output").orFalse.map(runSample)
     )
     val explain = Command("explain", "Explain a transaction field")(
@@ -61,17 +65,27 @@ object Main extends CommandIOApp(
     if !Set("text", "json").contains(options.format.toLowerCase) then
       IO(System.err.println("Error: --format must be either 'text' or 'json'"))
         .as(ExitCode(2))
+    else if options.maxErrors.exists(_ < 1) then
+      IO(System.err.println("Error: --max-errors must be at least 1"))
+        .as(ExitCode(2))
+    else if options.maxRecordBytes.exists(_ < 1) then
+      IO(System.err.println("Error: --max-record-bytes must be at least 1"))
+        .as(ExitCode(2))
     else
       IO.fromEither(AppConfig.load(options.config).leftMap(new IllegalArgumentException(_)))
         .flatMap { config =>
+          val effectiveConfig = config.copy(
+            maxErrors = options.maxErrors.getOrElse(config.maxErrors),
+            maxRecordBytes = options.maxRecordBytes.getOrElse(config.maxRecordBytes)
+          )
           StreamingRunner
             .run(
               Paths.get(options.file),
-              config,
+              effectiveConfig,
               mode,
               options.format.toLowerCase,
               options.quiet,
-              strict = options.strict || config.strict
+              strict = options.strict || effectiveConfig.strict
             )
             .map {
               case Right(_) => ExitCode.Success
@@ -81,33 +95,41 @@ object Main extends CommandIOApp(
             }
         }
         .handleErrorWith { error =>
-          val config = AppConfig.load(options.config).toOption
-          config.filter(value => StructuredLog.enabled(value.logLevel, "error")).foreach { _ =>
-            StructuredLog.event(
-              "error",
-              "command_failed",
-              "command" -> Json.fromString(modeName(mode)),
-              "message" -> Json.fromString(error.getMessage)
-            )
-          }
-          IO(System.err.println(s"Error: ${error.getMessage}")).as(ExitCode.Error)
+          val log = AppConfig.load(options.config) match
+            case Right(config) if StructuredLog.enabled(config.logLevel, "error") =>
+              IO.delay(
+                StructuredLog.event(
+                  "error",
+                  "command_failed",
+                  "command" -> Json.fromString(modeName(mode)),
+                  "message" -> Json.fromString(error.getMessage)
+                )
+              )
+            case _ => IO.unit
+          log *> IO(System.err.println(s"Error: ${error.getMessage}")).as(ExitCode.Error)
         }
 
   private def runSchema(format: String, quiet: Boolean): IO[ExitCode] =
-    if quiet then IO.pure(ExitCode.Success)
-    else if !Set("text", "json").contains(format.toLowerCase) then
+    if !Set("text", "json").contains(format.toLowerCase) then
       IO(System.err.println("Error: --format must be either 'text' or 'json'"))
         .as(ExitCode(2))
+    else if quiet then IO.pure(ExitCode.Success)
     else if format.equalsIgnoreCase("json") then
       IO.println(schemaJson.noSpaces).as(ExitCode.Success)
     else
+      val fieldLines = Transaction.schema.columns.map { column =>
+        val requirement = if column.required then "required" else "optional"
+        val description =
+          column.jsonSchema.hcursor.get[String]("description").toOption.map(s => s": $s").getOrElse("")
+        val aliases =
+          if column.deprecatedAliases.isEmpty then ""
+          else s" (deprecated alias: ${column.deprecatedAliases.mkString(", ")})"
+        s"- ${column.name}: $requirement$description$aliases"
+      }
+      val ruleLines = Transaction.schema.validationRules.map(rule => s"- Cross-field rule: $rule")
       IO.println(
-        """Transaction fields:
-          |- date: required ISO-8601 date string
-          |- category: required non-empty string
-          |- amount: required number in [0, 1000000]; note required when amount >= 1000
-          |- note: optional string (deprecated alias: memo)
-          |Unknown fields are ignored with warnings.""".stripMargin
+        (Vector("Transaction JSON Lines record fields:") ++ fieldLines ++ ruleLines :+
+          "Unknown fields are ignored with warnings.").mkString("\n")
       ).as(ExitCode.Success)
 
   private def runSample(quiet: Boolean): IO[ExitCode] =
@@ -118,51 +140,25 @@ object Main extends CommandIOApp(
           .as(ExitCode.Success)
 
   private def runExplain(field: String, quiet: Boolean): IO[ExitCode] =
-    val explanation = field match
-      case "date" =>
-        Some("Required ISO-8601 date string; invalid calendar dates are rejected.")
-      case "category" =>
-        Some("Required non-empty string. Whitespace-only values are rejected.")
-      case "amount" =>
-        Some("Required JSON number in [0, 1000000]. A note is required for amounts >= 1000.")
-      case "note" =>
-        Some("Optional string. Missing and null values decode as None; 'memo' is deprecated.")
-      case "memo" =>
-        Some("Deprecated alias for 'note'. It is accepted with a migration warning.")
-      case _ => None
-    if quiet then IO.pure(ExitCode.Success)
-    else
-      explanation match
-        case Some(text) => IO.println(s"$field: $text").as(ExitCode.Success)
-        case None =>
-          IO(System.err.println(s"Error: unknown transaction field '$field'"))
-            .as(ExitCode(2))
+    val explanation = Transaction.schema.columns
+      .find(column => column.name == field || column.deprecatedAliases.contains(field))
+      .map { column =>
+        if column.deprecatedAliases.contains(field) then
+          s"Deprecated alias for '${column.name}'. It is accepted with a migration warning."
+        else
+          val requirement = if column.required then "Required" else "Optional"
+          val description =
+            column.jsonSchema.hcursor.get[String]("description").toOption.getOrElse("")
+          s"$requirement. $description"
+      }
+    explanation match
+      case Some(_) if quiet => IO.pure(ExitCode.Success)
+      case Some(text)       => IO.println(s"$field: $text").as(ExitCode.Success)
+      case None =>
+        IO(System.err.println(s"Error: unknown transaction field '$field'"))
+          .as(ExitCode(2))
 
-  private val schemaJson: Json =
-    Json.obj(
-      "type" -> Json.fromString("array"),
-      "items" -> Json.obj(
-        "type" -> Json.fromString("object"),
-        "required" -> Json.arr(
-          Json.fromString("date"),
-          Json.fromString("category"),
-          Json.fromString("amount")
-        ),
-        "properties" -> Json.obj(
-          "date" -> Json.obj("type" -> Json.fromString("string"), "format" -> Json.fromString("date")),
-          "category" -> Json.obj(
-            "type" -> Json.fromString("string"),
-            "minLength" -> Json.fromInt(1)
-          ),
-          "amount" -> Json.obj(
-            "type" -> Json.fromString("number"),
-            "minimum" -> Json.fromInt(0),
-            "maximum" -> Json.fromInt(1000000)
-          ),
-          "note" -> Json.obj("type" -> Json.fromString("string"), "nullable" -> Json.True)
-        )
-      )
-    )
+  private val schemaJson: Json = Transaction.schema.jsonSchema
 
   private def modeName(mode: ProcessingMode): String =
     mode match

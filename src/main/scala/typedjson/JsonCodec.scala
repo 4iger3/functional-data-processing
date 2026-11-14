@@ -7,20 +7,33 @@ import typedjson.JsonError.*
 
 trait JsonCodec[A]:
   def decode(value: Json, path: JsonPath): DecodeResult[A]
+  def schema: Json
+  def schemaValue(value: A): Option[Json] = None
 
 object JsonCodec:
   given JsonCodec[String] with
+    val schema: Json = Json.obj("type" -> Json.fromString("string"))
+
     def decode(value: Json, path: JsonPath): DecodeResult[String] =
       value.asString match
         case Some(text) => DecodeResult.success(text)
         case None       => DecodeResult.failure(WrongType(path, "a string", jsonType(value)))
 
   given optionCodec[A](using codec: JsonCodec[A]): JsonCodec[Option[A]] with
+    val schema: Json = Json.obj(
+      "anyOf" -> Json.arr(codec.schema, Json.obj("type" -> Json.fromString("null")))
+    )
+
     def decode(value: Json, path: JsonPath): DecodeResult[Option[A]] =
       if value.isNull then DecodeResult.success(None)
       else codec.decode(value, path).map(Some(_))
 
   given listCodec[A](using codec: JsonCodec[A]): JsonCodec[List[A]] with
+    val schema: Json = Json.obj(
+      "type" -> Json.fromString("array"),
+      "items" -> codec.schema
+    )
+
     def decode(value: Json, path: JsonPath): DecodeResult[List[A]] =
       value.asArray match
         case None =>
@@ -37,12 +50,22 @@ object JsonCodec:
           DecodeResult(result, warnings)
 
   given JsonCodec[BigDecimal] with
+    val schema: Json = Json.obj("type" -> Json.fromString("number"))
+
+    override def schemaValue(value: BigDecimal): Option[Json] =
+      Some(Json.fromBigDecimal(value))
+
     def decode(value: Json, path: JsonPath): DecodeResult[BigDecimal] =
       value.asNumber.flatMap(_.toBigDecimal) match
         case Some(number) => DecodeResult.success(number)
         case None         => DecodeResult.failure(WrongType(path, "a number", jsonType(value)))
 
   given JsonCodec[LocalDate] with
+    val schema: Json = Json.obj(
+      "type" -> Json.fromString("string"),
+      "format" -> Json.fromString("date")
+    )
+
     def decode(value: Json, path: JsonPath): DecodeResult[LocalDate] =
       value.asString match
         case None => DecodeResult.failure(WrongType(path, "a date string", jsonType(value)))

@@ -10,6 +10,16 @@ enum ProcessingMode:
   case Validate, Parse
 
 object StreamingRunner:
+  private[typedjson] final case class DiagnosticState(
+      errorsPrinted: Int = 0,
+      limitNoticePrinted: Boolean = false
+  )
+
+  private[typedjson] final case class DiagnosticPlan(
+      state: DiagnosticState,
+      messages: Vector[(String, String)]
+  )
+
   def run(
       path: Path,
       config: AppConfig,
@@ -23,13 +33,16 @@ object StreamingRunner:
       initial = RunMetrics()
       result <- StreamingJson
         .records(path, config)
-        .evalMap(record => emitRecord(record, mode, format, quiet, config.maxErrors))
+        .evalMapAccumulate(DiagnosticState()) { (state, record) =>
+          emitRecord(record, mode, format, quiet, config.maxErrors, state)
+        }
+        .map(_._2)
         .compile
         .fold(initial) { (metrics, record) => metrics.record(record.result) }
       finished <- IO.monotonic
       metrics = result.copy(elapsedNanos = (finished - started).toNanos)
       _ <- emitSummary(metrics, mode, format, quiet)
-      _ <- logCompletion(metrics, strict, config, quiet)
+      _ <- logCompletion(metrics, mode, strict, config, quiet)
       outcome =
         if metrics.errors > 0 then Left(s"Found ${metrics.errors} decoding errors.")
         else if strict && metrics.warnings > 0 then
@@ -42,18 +55,13 @@ object StreamingRunner:
       mode: ProcessingMode,
       format: String,
       quiet: Boolean,
-      maxErrors: Int
-  ): IO[StreamRecord] =
-    val errors = record.result.value.left.toOption.getOrElse(Vector.empty)
-    val warningMessages = record.result.warnings
-    val diagnostics =
-      if record.line > maxErrors then IO.unit
-      else
-        traverseVector_(warningMessages)(warning =>
-          IO(System.err.println(s"Warning: ${warning.message}")).whenA(!quiet)
-        ) *> traverseVector_(errors)(error =>
-          IO(System.err.println(s"Error: ${error.message}"))
-        )
+      maxErrors: Int,
+      state: DiagnosticState
+  ): IO[(DiagnosticState, StreamRecord)] =
+    val plan = diagnosticPlan(record, maxErrors, quiet, state)
+    val diagnostics = traverseVector_(plan.messages) { case (level, message) =>
+      IO(System.err.println(s"$level: $message"))
+    }
 
     val output = (mode, record.result.value) match
       case (ProcessingMode.Parse, Right(transaction)) if !quiet =>
@@ -63,7 +71,34 @@ object StreamingRunner:
         IO.println(rendered)
       case _ => IO.unit
 
-    diagnostics *> output.as(record)
+    (diagnostics *> output).as((plan.state, record))
+
+  private[typedjson] def diagnosticPlan(
+      record: StreamRecord,
+      maxErrors: Int,
+      quiet: Boolean,
+      state: DiagnosticState
+  ): DiagnosticPlan =
+    val errors = record.result.value.left.toOption.getOrElse(Vector.empty)
+    val remaining = math.max(0, maxErrors - state.errorsPrinted)
+    val visibleErrors = errors.take(remaining)
+    val suppressed = errors.size > visibleErrors.size
+    val warnings =
+      if quiet then Vector.empty
+      else record.result.warnings.map(warning => "Warning" -> warning.message)
+    val errorMessages = visibleErrors.map(error => "Error" -> error.message)
+    val showLimitNotice = suppressed && !state.limitNoticePrinted
+    val notice =
+      if showLimitNotice && !quiet then
+        Vector("Warning" -> s"Further error diagnostics suppressed after $maxErrors errors.")
+      else Vector.empty
+    DiagnosticPlan(
+      DiagnosticState(
+        errorsPrinted = state.errorsPrinted + visibleErrors.size,
+        limitNoticePrinted = state.limitNoticePrinted || showLimitNotice
+      ),
+      warnings ++ errorMessages ++ notice
+    )
 
   private def emitSummary(
       metrics: RunMetrics,
@@ -82,6 +117,7 @@ object StreamingRunner:
 
   private def logCompletion(
       metrics: RunMetrics,
+      mode: ProcessingMode,
       strict: Boolean,
       config: AppConfig,
       quiet: Boolean
@@ -91,7 +127,11 @@ object StreamingRunner:
     if quiet && level == "info" || !StructuredLog.enabled(config.logLevel, level) then IO.unit
     else
       val fields = Vector(
-        "command" -> Json.fromString("stream"),
+        "command" -> Json.fromString(
+          mode match
+            case ProcessingMode.Validate => "validate"
+            case ProcessingMode.Parse    => "parse"
+        ),
         "status" -> Json.fromString(if failed then "failed" else "succeeded"),
         "records" -> Json.fromLong(metrics.records),
         "validRecords" -> Json.fromLong(metrics.validRecords),

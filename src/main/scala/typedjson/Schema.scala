@@ -5,7 +5,8 @@ import typedjson.JsonError.*
 
 final class Schema[A] private (
     private[typedjson] val columns: Vector[Column[?]],
-    private val decodeFields: (JsonObject, JsonPath) => DecodeResult[A]
+    private val decodeFields: (JsonObject, JsonPath) => DecodeResult[A],
+    private[typedjson] val validationRules: Vector[String]
 ):
   private[typedjson] def decodeRecord(record: JsonObject, path: JsonPath): DecodeResult[A] =
     val decoded = decodeFields(record, path)
@@ -24,16 +25,44 @@ final class Schema[A] private (
       case None => DecodeResult.failure(ExpectedObject(path))
 
   def codec: JsonCodec[A] = new JsonCodec[A]:
+    val schema: Json = jsonSchema
+
     def decode(value: Json, path: JsonPath): DecodeResult[A] =
       decodeJson(value, path)
 
+  def jsonSchema: Json =
+    val aliases = columns.flatMap(column =>
+      column.deprecatedAliases.map(alias => alias -> column.name)
+    )
+    Json.obj(
+      "$schema" -> Json.fromString("https://json-schema.org/draft/2020-12/schema"),
+      "type" -> Json.fromString("object"),
+      "required" -> Json.arr(
+        columns.filter(_.required).map(column => Json.fromString(column.name))*
+      ),
+      "properties" -> Json.obj(
+        columns.map(column => column.name -> column.jsonSchema)*
+      ),
+      "additionalProperties" -> Json.True,
+      "x-deprecatedAliases" -> Json.obj(
+        aliases.map { case (alias, replacement) =>
+          alias -> Json.fromString(replacement)
+        }*
+      ),
+      "x-validationRules" -> Json.arr(validationRules.map(Json.fromString)*)
+    )
+
+  def withValidationRule(description: String): Schema[A] =
+    require(description.nonEmpty, "validation rule description must not be empty")
+    new Schema(columns, decodeFields, validationRules :+ description)
+
   def map[B](f: A => B): Schema[B] =
-    Schema(columns) { (record: JsonObject, path: JsonPath) =>
+    Schema(columns, validationRules) { (record: JsonObject, path: JsonPath) =>
       decodeFields(record, path).map(f)
     }
 
   def zip[B, C](column: Column[B])(f: (A, B) => C): Schema[C] =
-    Schema(columns :+ column) { (record: JsonObject, path: JsonPath) =>
+    Schema(columns :+ column, validationRules) { (record: JsonObject, path: JsonPath) =>
       val left = decodeFields(record, path)
       val right = column.decodeValue(record, path)
       left.zipAccumulating(right).map { case (a, b) => f(a, b) }
@@ -42,7 +71,7 @@ final class Schema[A] private (
   def validateWith(
       validate: (A, JsonPath) => Either[JsonError, Unit]
   ): Schema[A] =
-    Schema(columns) { (record: JsonObject, path: JsonPath) =>
+    Schema(columns, validationRules) { (record: JsonObject, path: JsonPath) =>
       decodeFields(record, path).andThen { value =>
         validate(value, path) match
           case Right(_)    => DecodeResult.success(value)
@@ -51,10 +80,10 @@ final class Schema[A] private (
     }
 
 object Schema:
-  def apply[A](columns: Vector[Column[?]])(
+  def apply[A](columns: Vector[Column[?]], validationRules: Vector[String] = Vector.empty)(
       decode: (JsonObject, JsonPath) => DecodeResult[A]
   ): Schema[A] =
-    new Schema(columns, decode)
+    new Schema(columns, decode, validationRules)
 
   def field[A, Z](column: Column[A])(f: A => Z): Schema[Z] =
     Schema(Vector(column)) { (record: JsonObject, path: JsonPath) =>

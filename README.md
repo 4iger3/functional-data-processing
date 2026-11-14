@@ -16,17 +16,37 @@ Requirements: Java 17+ and sbt.
 
 ```bash
 sbt test
-sbt "run examples/transactions.json"
+sbt "run validate examples/transactions.jsonl"
+sbt "run parse examples/transactions.jsonl --format json"
+sbt "run schema --format json"
 ```
 
-The input must be a JSON array of transaction objects. Each object must include
-`date`, `category`, and `amount`; `note` is optional and may be absent or null.
-Dates use `YYYY-MM-DD`; amounts must be JSON numbers. Additional JSON fields are
-ignored with warnings. Schemas can be composed to validate nested objects.
+The CLI accepts **JSON Lines**: one complete transaction JSON object per
+non-empty line. Each object must include `date`, `category`, and `amount`;
+`note` is optional and may be absent or null. Dates use `YYYY-MM-DD`; amounts
+must be JSON numbers. Additional JSON fields are ignored with warnings.
+`validate` checks records and reports a summary; `parse` emits valid records as
+normalized JSON Lines when `--format json` is selected.
 
-Malformed JSON and invalid fields are reported with precise paths; the
-application exits with a non-zero status instead of producing a partial success
-report.
+The library API is separate: `JsonData.parseTransactions` accepts a single JSON
+array and accumulates errors across its elements. Schemas can also be composed
+to validate nested objects.
+
+Malformed JSON and invalid fields are reported with precise paths. The CLI
+returns a non-zero exit status if validation fails; `--strict` also fails when
+warnings are present. `--quiet` suppresses summaries and warnings, but errors
+remain visible. `--max-errors` caps the number of printed error details while
+metrics continue to count every error. `--max-record-bytes` is enforced while
+reading each line, so an oversized record is discarded without buffering it
+fully in memory. Both limits can also be set in `application.conf`. Blank lines
+are ignored.
+
+Use `sbt "run sample"` to print example JSON Lines or `sbt "run explain amount"`
+to see a field's validation rule. The `schema` command emits a JSON Schema
+description of one transaction record; field definitions and cross-field rules
+are generated from the same schema used for decoding. Cross-field rules are
+published as the `x-validationRules` extension; the JSON Schema description is
+informational for those rules, while the Scala decoder enforces them.
 
 ## Library usage
 

@@ -2,7 +2,7 @@ package typedjson
 
 final case class JsonPath private (segments: Vector[JsonPath.Segment]):
   def field(name: String): JsonPath = copy(segments = segments :+ JsonPath.Field(name))
-  def index(value: Int): JsonPath = copy(segments = segments :+ JsonPath.Index(value))
+  def index(value: Long): JsonPath = copy(segments = segments :+ JsonPath.Index(value))
 
   override def toString: String =
     segments.foldLeft("$") {
@@ -17,6 +17,6 @@ final case class JsonPath private (segments: Vector[JsonPath.Segment]):
 object JsonPath:
   private[typedjson] sealed trait Segment
   private final case class Field(name: String) extends Segment
-  private final case class Index(value: Int) extends Segment
+  private final case class Index(value: Long) extends Segment
 
   val root: JsonPath = JsonPath(Vector.empty)
